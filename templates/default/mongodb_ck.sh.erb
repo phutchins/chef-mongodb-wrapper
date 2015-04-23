@@ -1,0 +1,81 @@
+#!/bin/bash
+EMAIL="admin@example.com"
+DATE=`date '+%m/%d/%Y'`
+
+ALERT_DIR="<%=node[:mongodb][:logpath]%>"
+ALERT_FILE="mongodb.log"
+ALERT_LOG="$ALERT_DIR/$ALERT_FILE"
+LOG_DIR="<%=node[:mongodb][:util_log_dir]%>"
+BIN_DIR="<%=node[:mongodb][:util_bin_dir]%>"
+CONF_DIR="<%=node[:mongodb][:util_conf_dir]%>"
+OUTFILE="${LOG_DIR}/MongoDBError.txt"
+SCRIPT_PATH="${BIN_DIR}"
+SQLCHECK_EXCLUDE="${CONF_DIR}/mongodb_exclude.conf"
+if [ ! -e "${SQLCHECK_EXCLUDE}" ]; then
+  touch "${SQLCHECK_EXCLUDE}"
+fi
+ERR_COUNT_FILE="${LOG_DIR}/mongodb_err.cnt"
+HOSTNAME="`hostname`"
+EMAIL_SUBJECT="MongoDB Errors"
+ERR_EXCLUDE=$(sed -e 's,.*,\&\& !/&/ ,' "${SQLCHECK_EXCLUDE}")
+AWK_PATTERN="( /relin/ || /FATAL/ || /error/ || /fail/ || /shutdown/  )"`echo $ERR_EXCLUDE`""
+
+DB_CHECK=`mongo  admin  --eval "db.getName()" | grep -i -c 'error'`
+
+# Check exit code from MongoDB connection
+if [ $DB_CHECK -ne 0 ]
+then
+  echo "ERROR: Connecting to MongoDB server. ${HOSTNAME}" > $OUTFILE
+  echo >> $OUTFILE
+  echo "--------------------" >> $OUTFILE
+  echo >> $OUTFILE
+
+  echo "Server:${HOSTNAME}" >> $OUTFILE
+  echo "Script Path:${SCRIPT_PATH}" >> $OUTFILE
+
+  logger -p CRIT -t MongoDB "MongoDB ERROR: MongoDB may be unavaiable on ${HOSTNAME}"
+  cat $OUTFILE | mail -s "${EMAIL_SUBJECT} ${DATE} ${HOSTNAME}" $EMAIL
+
+exit 1
+fi
+
+# check for errors
+
+  if [ ! -r "$ALERT_LOG" ]
+     then
+     echo "No readable MongoDB log $ALERT_FILE in $ALERT_DIR. ${HOSTNAME}"  > $OUTFILE
+     cat $OUTFILE | mail -s "${EMAIL_SUBJECT} ${DATE} ${HOSTNAME}" $EMAIL
+     exit 1
+  fi
+
+  if [ ! -r "$ERR_COUNT_FILE" ]
+     then
+     echo 0 > $ERR_COUNT_FILE
+  fi
+
+  # number of previous errors
+  ERR_PREV="$(<$ERR_COUNT_FILE)"
+
+  # number of current errors
+  ERR_CURR="$(awk  "$AWK_PATTERN {t += 1}; END {print t}" "$ALERT_LOG")"
+
+  # write current error number to file (to be used at next check)
+  echo "$ERR_CURR" > $ERR_COUNT_FILE
+
+  if (( ${ERR_CURR:=0} > ${ERR_PREV:=$ERR_CURR} )); then
+       # there are new errors: send message to NetCool
+
+       #count the number of new errors
+       let NUM_ERRS=$ERR_CURR-$ERR_PREV
+
+       # only send NetCool the 1st line of the most recent errors
+       LAST_ERROR="$(awk "$AWK_PATTERN" "$ALERT_LOG" | tail -n ${NUM_ERRS} | head -n 1 )"
+       ERRORS="$(awk "$AWK_PATTERN" "$ALERT_LOG" | tail -n ${NUM_ERRS} )"
+       echo "MongoDB has $NUM_ERRS errors -- $LAST_ERROR. ${HOSTNAME}" > $OUTFILE
+
+       logger -p CRIT -t MongoDB "MongoDB ERROR: MongoDB error occurs on ${HOSTNAME}"
+       cat $OUTFILE | mail -s "${EMAIL_SUBJECT} ${DATE} ${HOSTNAME}" $EMAIL
+       echo "$(date): MongoDB has $NUM_ERRS errors"
+       echo "Most recent errors: \n$ERRORS"
+  fi
+
